@@ -1,0 +1,99 @@
+// ─────────────────────────────────────────────────────────────────────────────
+//  AUTO WIN — визуально обнуляем HP врагов + таймеры раунда
+//  Порт f_autowin.hpp под normal7 SDK (rpm/wpm + oxorany).
+//  Если ты хост — изменения таймеров синхронизируются всем в комнате.
+// ─────────────────────────────────────────────────────────────────────────────
+
+#include "autowin.hpp"
+#include "../game/game.hpp"
+#include "../game/player.hpp"
+#include "../ui/cfg.hpp"
+#include "../protect/oxorany.hpp"
+
+namespace {
+    static inline bool valid_addr(uint64_t a) {
+        return a > 0x10000ull && a < 0x0000FFFFFFFFFFFFull;
+    }
+
+    // Обнуляем все таймеры раунда в GameController / DefuseController
+    static void zero_round_timers() {
+        // GameController — static singleton, тот же паттерн что player_manager
+        // Используем второй известный static offset (fallback из offsets.hpp)
+        if (proc::lib == 0) return;
+
+        // Пробуем найти GameController через поле PlayerManager + 0x18
+        uint64_t pm = get_player_manager();
+        if (!valid_addr(pm)) return;
+
+        uint64_t gc = rpm<uint64_t>(pm + oxorany(0x18));
+        if (!valid_addr(gc)) return;
+
+        // DefuseController offsets (сериализованные поля):
+        static const uint64_t defuse_offs[] = { 0x2E4, 0x2E8, 0x2EC, 0x2FC };
+        for (auto off : defuse_offs)
+            wpm<uint32_t>(gc + oxorany(off), 0u);
+
+        // GameController -> GameModeSettings (0xD0)
+        uint64_t settings = rpm<uint64_t>(gc + oxorany(0xD0));
+        if (!valid_addr(settings)) return;
+        wpm<uint32_t>(settings + oxorany(0x1C), 0u); // _matchTime
+        wpm<uint32_t>(settings + oxorany(0x20), 0u); // _roundStartingTime
+        wpm<uint32_t>(settings + oxorany(0x24), 0u); // _roundTime
+    }
+
+    // Перебираем всех игроков и обнуляем HP врагов через Photon-свойство "health"
+    static void kill_enemies() {
+        uint64_t pm = get_player_manager();
+        if (!valid_addr(pm)) return;
+
+        uint64_t lp = rpm<uint64_t>(pm + oxorany(0x70));
+        if (!valid_addr(lp)) return;
+
+        int local_team = rpm<uint8_t>(lp + oxorany(0x79));
+
+        uint64_t player_list   = rpm<uint64_t>(pm + oxorany(0x28));
+        if (!valid_addr(player_list)) return;
+        int count              = rpm<int>(player_list + oxorany(0x20));
+        if (count <= 0 || count > 64) return;
+        uint64_t list_buf      = rpm<uint64_t>(player_list + oxorany(0x18));
+        if (!valid_addr(list_buf)) return;
+
+        for (int i = 0; i < count; i++) {
+            uint64_t e = rpm<uint64_t>(list_buf + oxorany(0x30) + oxorany(0x18) * i);
+            if (!valid_addr(e) || e == lp) continue;
+            if (rpm<uint8_t>(e + oxorany(0x79)) == (uint8_t)local_team) continue;
+            if (player::health(e) <= 0) continue;
+
+            // Пишем 0 в Photon-свойство "health" (тот же путь что props.cpp)
+            uint64_t photon = player::photon_ptr(e);
+            if (!valid_addr(photon)) continue;
+            uint64_t props_reg = rpm<uint64_t>(photon + oxorany(0x38));
+            if (!valid_addr(props_reg)) continue;
+            int pcount = rpm<int>(props_reg + oxorany(0x20));
+            if (pcount <= 0 || pcount > 128) continue;
+            uint64_t plist = rpm<uint64_t>(props_reg + oxorany(0x18));
+            if (!valid_addr(plist)) continue;
+
+            for (int j = 0; j < pcount; j++) {
+                uint64_t key = rpm<uint64_t>(plist + oxorany(0x28) + oxorany(0x18) * j);
+                uint64_t val = rpm<uint64_t>(plist + oxorany(0x30) + oxorany(0x18) * j);
+                if (!valid_addr(key) || !valid_addr(val)) continue;
+                std::string ks = rpm<read_string>(key).as_utf8();
+                if (ks.find("health") != std::string::npos) {
+                    wpm<int>(val + oxorany(0x10), 0);
+                    break;
+                }
+            }
+        }
+    }
+}
+
+namespace autowin {
+
+void run() {
+    if (!cfg::misc::autowin) return;
+    kill_enemies();
+    zero_round_timers();
+}
+
+} // namespace autowin
