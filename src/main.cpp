@@ -37,7 +37,7 @@ static void print_status(const char* status) {
 }
 
 static void launch_standoff() {
-    system(oxorany("am start -n com.standoff/com.standoff.MainActivity"));
+    system(oxorany("am start -n com.jarvigames.viceonline/com.jarvigames.viceonline.MainActivity"));
 }
 
 int main() {
